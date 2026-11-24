@@ -30,6 +30,23 @@
 //!   - [`StudioSynth`]: 48,000 Hz `f32` high-fidelity renderer with a
 //!     compile-time Lanczos-3 polyphase LUT (plus general Lanczos-`a`
 //!     fallback) and equal-power stereo panning.
+//!
+//! ## Quickstart
+//! ```rust
+//! use ead_sma::{AccuracySynth, EadSampleView, EadSmaVersion, EadVoice, DMA_FRAME_SAMPLES};
+//!
+//! let mut sample_bytes = [0u8; 24];
+//! sample_bytes[0..4].copy_from_slice(&8u32.to_le_bytes());
+//! sample_bytes[12..16].copy_from_slice(&8u32.to_le_bytes());
+//! sample_bytes[16..24].copy_from_slice(&[0, 32, 64, 96, 127, 96, 64, 32]);
+//!
+//! let sample = EadSampleView::parse(&sample_bytes).unwrap();
+//! let mut voice = EadVoice::new(256, 200, 64);
+//! let mut out_l = [0i16; DMA_FRAME_SAMPLES];
+//! let mut out_r = [0i16; DMA_FRAME_SAMPLES];
+//! AccuracySynth::mix_voice(EadSmaVersion::Sma4Mla, &sample, &mut voice, &mut out_l, &mut out_r);
+//! assert!(out_l.iter().any(|&s| s != 0));
+//! ```
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![deny(unsafe_code)]

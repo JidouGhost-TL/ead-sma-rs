@@ -1,5 +1,8 @@
 # ead-sma-rs
 
+[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](#license)
+[![no_std](https://img.shields.io/badge/no__std-compatible-success.svg)](#features)
+
 Pure Rust, zero-dependency parser, software synthesizer, and byte-exact
 `libmgba` ARM golden-tested emulator for the **Nintendo EAD / SRD custom
 DirectSound sound engine** used by the *Super Mario Advance* series on the
@@ -67,19 +70,40 @@ returned phase are captured under `tests/golden/` (12 vectors, 1,352
 bytes, SHA-256 manifest in `tests/golden/manifest.json`). No copyrighted
 game audio is used or committed.
 
-## Usage
+## Quickstart
 
 ```rust
-use ead_sma::{AccuracySynth, EadSampleView, EadSmaVersion, EadVoice};
+use ead_sma::{AccuracySynth, EadSampleView, EadSmaVersion, EadVoice, DMA_FRAME_SAMPLES};
 
-let version = EadSmaVersion::detect_from_bytes(rom_bytes);
-let sample = EadSampleView::parse(sample_bytes).unwrap();
+// 16-byte EAD/SRD descriptor (total_len=8, rate=0, loop_start=0, loop_end=8) + 8-byte PCM.
+let mut sample_bytes = [0u8; 24];
+sample_bytes[0..4].copy_from_slice(&8u32.to_le_bytes());
+sample_bytes[12..16].copy_from_slice(&8u32.to_le_bytes());
+sample_bytes[16..24].copy_from_slice(&[0, 32, 64, 96, 127, 96, 64, 32]);
+
+let sample = EadSampleView::parse(&sample_bytes).unwrap();
 let mut voice = EadVoice::new(256, 200, 64);
-let mut out_l = [0i16; 176];
-let mut out_r = [0i16; 176];
-AccuracySynth::mix_voice(version.unwrap(), &sample, &mut voice, &mut out_l, &mut out_r);
+let mut out_l = [0i16; DMA_FRAME_SAMPLES];
+let mut out_r = [0i16; DMA_FRAME_SAMPLES];
+AccuracySynth::mix_voice(EadSmaVersion::Sma4Mla, &sample, &mut voice, &mut out_l, &mut out_r);
 ```
+
+## Benchmarks
+
+```sh
+cargo bench --bench bench_audio
+```
+
+| Benchmark | Throughput |
+|---|---:|
+| `AccuracySynth::mix_voice` (`Sma23Shift8`, 176f) | ~7.04 GSamples/s |
+| `AccuracySynth::mix_voice` (`Sma4Mla`, 176f) | ~8.51 GSamples/s |
+| `AccuracySynth::convert + combine` (176f) | ~7.10 GSamples/s |
+| `StudioSynth::render_voice_f32` (48 kHz Lanczos-3, 1,024f) | ~904 MSamples/s |
 
 ## License
 
-Dual-licensed under MIT OR Apache-2.0.
+Licensed under either of:
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
