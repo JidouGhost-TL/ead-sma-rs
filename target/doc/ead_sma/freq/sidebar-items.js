@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DMA_FRAME_SAMPLES","GBA_CLOCK_HZ","Q8_ONE"],"fn":["arm_sdiv","arm_udiv","freq_to_step_q8","pan_gains","rate_from_timer_reload","step_q8_to_freq"]};

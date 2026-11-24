@@ -1,0 +1,44 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Nintendo EAD/SRD Super Mario Advance engine revision detection."><title>ead_sma::version - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="ead_sma" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.0 (88d9e12ae 2026-08-18)" data-channel="1.98.0" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module version</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../ead_sma/index.html">ead_sma</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module version</a></h2><h3><a href="#enums">Module Items</a></h3><ul class="block"><li><a href="#enums" title="Enums">Enums</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate ead_<wbr>sma</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">ead_sma</a></div><h1>Module <span>version</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/ead_sma/version.rs.html#1-165">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Nintendo EAD/SRD Super Mario Advance engine revision detection.</p>
+<p>A full-corpus audit of all 3,377 GBA ROMs identifies <strong>35 ROM images</strong>
+powered by the EAD/SRD custom DirectSound mixer across <strong>2 distinct
+ARM7TDMI IWRAM kernel revisions</strong>:</p>
+<ol>
+<li><a href="enum.EadSmaVersion.html#variant.Sma23Shift8" title="variant ead_sma::version::EadSmaVersion::Sma23Shift8"><code>EadSmaVersion::Sma23Shift8</code></a> (<strong>12 ROMs</strong> — <em>Super Mario Advance 2</em>
+USA/Europe/Japan/China, <em>Super Mario Advance 3</em> USA/Europe/Japan in
+retail and Virtual Console forms, the China-market <em>Yoshi’s Island</em>
+release, and a China-market <em>Mario &amp; Luigi</em> prototype whose embedded
+<em>Mario Bros.</em> classic mode uses this driver):
+<ul>
+<li>Voice mixer accumulates <code>(sample * volume) &gt;&gt; 8</code> per output frame
+(ARM <code>mul</code> + <code>add ..., asr #8</code>, truncated to <code>i16</code> on store).</li>
+<li>DMA converter stores the low byte of each <code>i16</code> accumulator,
+saturating to <code>[-128, 127]</code> only when the value lies outside that
+range (<code>(v &amp; 0xFF80) != 0 &amp;&amp; != 0xFF80</code>).</li>
+<li>Buffer combine attenuates with round-half bias <code>1 &lt;&lt; (shift - 1)</code>
+for <strong>all</strong> source values, negative or not.</li>
+</ul>
+</li>
+<li><a href="enum.EadSmaVersion.html#variant.Sma4Mla" title="variant ead_sma::version::EadSmaVersion::Sma4Mla"><code>EadSmaVersion::Sma4Mla</code></a> (<strong>23 ROMs</strong> — all <em>Super Mario Advance 4</em>
+regional/revision/Virtual Console/Switch Online images, the
+<em>Mario Bros.</em> classic mode inside <em>Super Mario Advance 3</em>, and
+<em>The Legend of Zelda: A Link to the Past &amp; Four Swords</em> USA/Europe/Japan):
+<ul>
+<li>Voice mixer accumulates <code>sample * volume</code> with <strong>no shift</strong>
+(ARM <code>mla</code>), so its voice volumes are pre-scaled by 1/256 relative
+to the older revision.</li>
+<li>DMA converter first computes <code>(v + (v &lt; 0 ? 127 : 0)) &gt;&gt; 7</code>
+(round-toward-zero division by 128), then applies the same
+<code>[-128, 127]</code> saturation test to the shifted value.</li>
+<li>Buffer combine attenuates with bias <code>(1 &lt;&lt; shift) - 1</code> applied
+<strong>only to negative</strong> source values (ceil-style rounding).</li>
+</ul>
+</li>
+</ol>
+<p>Both revisions share the same voice-render wrapper semantics (Q8 phase,
+<code>176</code>-sample DMA frames, planar left/right <code>i16</code> mix buffers), the same
+16-byte sample descriptor layout, and identical ARM unsigned/signed
+division helpers. <em>Super Mario Advance 3</em> cartridges contain <strong>both</strong>
+revisions (the main game uses <code>Sma23Shift8</code>; the <em>Mario Bros.</em> classic
+mode uses <code>Sma4Mla</code>); <a href="enum.EadSmaVersion.html#method.detect_from_bytes" title="associated function ead_sma::version::EadSmaVersion::detect_from_bytes"><code>EadSmaVersion::detect_from_bytes</code></a> reports the
+main-game revision in that case.</p>
+</div></details><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.EadSmaVersion.html" title="enum ead_sma::version::EadSmaVersion">EadSma<wbr>Version</a></dt><dd>Distinct Nintendo EAD/SRD ARM7TDMI mixer revisions discovered across the GBA corpus.</dd></dl></section></div></main></body></html>

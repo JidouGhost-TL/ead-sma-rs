@@ -1,0 +1,50 @@
+{
+  "sma23_combine_shift2.bin": {
+    "bytes": 128,
+    "sha256": "6ae9166fcdca45d39b83b909c631b8c37729b0023de2bbeabfb5abaaaefbf8d2"
+  },
+  "sma23_combine_shift4.bin": {
+    "bytes": 128,
+    "sha256": "165ee8670ef97e89b9236376c1381177ffc477b0b88f8f9a321d9cc083df8b90"
+  },
+  "sma23_convert.bin": {
+    "bytes": 32,
+    "sha256": "80239814d7370858eda955b8e0238fa8849b24b2b32a1d0e46928ed3d93f37bb"
+  },
+  "sma23_mix_30f_step128.bin": {
+    "bytes": 124,
+    "sha256": "e37d197129345f683256599cbb68fdbfff582a62bbb99fce346db2dffdf9f9c1"
+  },
+  "sma23_mix_32f_step256.bin": {
+    "bytes": 132,
+    "sha256": "3340f671ccc3c537d1ae5a1c8e8590ae0faaeea3bf2b98e838740b55d27b5b77"
+  },
+  "sma23_mix_32f_step640.bin": {
+    "bytes": 132,
+    "sha256": "b7656e4982c9697645ff31f9f403d79a3e567901342a58ccc5b44b318756c3a6"
+  },
+  "sma4_combine_shift2.bin": {
+    "bytes": 128,
+    "sha256": "8b6411a0c19a550b3637c082c6c8fee80952017f3b59f5a7b5432e05c4f7dc32"
+  },
+  "sma4_combine_shift4.bin": {
+    "bytes": 128,
+    "sha256": "7009400cb1fd9ec48e18c1bce10964c910122fdf6eb48152cb589750d26a5076"
+  },
+  "sma4_convert.bin": {
+    "bytes": 32,
+    "sha256": "29177a12136ec80f93bb1b050becea8fd749fcf6ce473e790b055296f6e9bd6b"
+  },
+  "sma4_mix_30f_step128.bin": {
+    "bytes": 124,
+    "sha256": "29fa85059b2cd191085f65820d63a16d50591e89c4652a7625da263b6da437c1"
+  },
+  "sma4_mix_32f_step256.bin": {
+    "bytes": 132,
+    "sha256": "08b7a3ad9172233746d3d470839e05b48afd8733126e99aab2309979433167d9"
+  },
+  "sma4_mix_32f_step640.bin": {
+    "bytes": 132,
+    "sha256": "c49de43ac0b605e73e97ec38d30856e9498181a0f448af6d3322be499363fbaf"
+  }
+}

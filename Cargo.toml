@@ -1,0 +1,24 @@
+[package]
+name = "ead-sma"
+version = "0.1.0"
+edition = "2021"
+authors = ["The gbakit Authors"]
+description = "Pure Rust, zero-dependency parser, software synthesizer, and byte-exact golden-tested emulator for the Nintendo EAD/SRD Super Mario Advance GBA sound engine"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/jidoughost-tl/ead-sma-rs"
+keywords = ["gba", "nintendo", "super-mario-advance", "audio", "synthesizer"]
+categories = ["multimedia::audio", "emulators", "no-std"]
+
+[dependencies]
+
+[features]
+default = ["std"]
+std = ["alloc"]
+alloc = []
+
+[dev-dependencies]
+
+[[bench]]
+name = "bench_audio"
+harness = false
