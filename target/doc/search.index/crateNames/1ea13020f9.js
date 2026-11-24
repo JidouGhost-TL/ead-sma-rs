@@ -1,1 +1,0 @@
-rd_("gead_sma")
