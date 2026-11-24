@@ -86,11 +86,13 @@ impl EadSmaVersion {
     /// *Super Mario Advance*, *Mario Kart: Super Circuit*, and *F-Zero*).
     #[must_use]
     pub fn detect_from_bytes(rom: &[u8]) -> Option<Self> {
-        // Sma23Shift8 kernel block: [converter][mixer @ +0xC0][combine @ +0x1E0]
-        const A_CONV: [u8; 24] = [
+        // Shared 20-byte prefix of both revisions' DMA converter kernel.
+        const CONV_PREFIX: [u8; 20] = [
             0x30, 0x00, 0x2D, 0xE9, 0x7F, 0x40, 0xA0, 0xE3, 0xFF, 0x5C, 0xA0, 0xE3, 0x80, 0x50,
-            0x85, 0xE3, 0xF2, 0x30, 0xD0, 0xE0, 0x05, 0xC0, 0x13, 0xE0,
+            0x85, 0xE3, 0xF2, 0x30, 0xD0, 0xE0,
         ];
+        // Sma23Shift8 kernel block: [converter][mixer @ +0xC0][combine @ +0x1E0]
+        const A_CONV_TAIL: [u8; 4] = [0x05, 0xC0, 0x13, 0xE0];
         const A_MIX: [u8; 24] = [
             0x0D, 0xC0, 0xA0, 0xE1, 0xF0, 0x03, 0x2D, 0xE9, 0xF0, 0x00, 0x9C, 0xE8, 0x01, 0xC0,
             0x43, 0xE0, 0x07, 0xC0, 0x0C, 0xE2, 0x00, 0x00, 0x5C, 0xE3,
@@ -100,10 +102,7 @@ impl EadSmaVersion {
             0xA0, 0xE1, 0xF0, 0x50, 0xD0, 0xE1, 0xF0, 0xC0, 0xD1, 0xE1,
         ];
         // Sma4Mla kernel block: [converter][mixer @ +0x120][combine @ +0x218]
-        const B_CONV: [u8; 24] = [
-            0x30, 0x00, 0x2D, 0xE9, 0x7F, 0x40, 0xA0, 0xE3, 0xFF, 0x5C, 0xA0, 0xE3, 0x80, 0x50,
-            0x85, 0xE3, 0xF2, 0x30, 0xD0, 0xE0, 0x00, 0x00, 0x53, 0xE3,
-        ];
+        const B_CONV_TAIL: [u8; 4] = [0x00, 0x00, 0x53, 0xE3];
         const B_MIX: [u8; 24] = [
             0x0D, 0xC0, 0xA0, 0xE1, 0xF0, 0x01, 0x2D, 0xE9, 0xF0, 0x00, 0x9C, 0xE8, 0x01, 0xC0,
             0x43, 0xE0, 0x07, 0xC0, 0x0C, 0xE2, 0x00, 0x00, 0x5C, 0xE3,
@@ -113,31 +112,38 @@ impl EadSmaVersion {
             0x44, 0xE2, 0xF0, 0x50, 0xD0, 0xE1, 0xF0, 0xC0, 0xD1, 0xE1,
         ];
 
-        if find_block(rom, &A_CONV, &A_MIX, 0xC0, &A_COMB, 0x1E0) {
-            return Some(Self::Sma23Shift8);
+        // Single-pass scan over the shared 20-byte prefix; Sma23Shift8 takes
+        // priority over Sma4Mla (matching SMA3 dual-revision cartridges).
+        let mut start = 0usize;
+        let mut found_sma4 = false;
+        while let Some(rel) = find_subslice(&rom[start..], &CONV_PREFIX) {
+            let base = start + rel;
+            if base + 24 <= rom.len() {
+                let tail = &rom[base + 20..base + 24];
+                if tail == A_CONV_TAIL
+                    && base + 0x1E0 + A_COMB.len() <= rom.len()
+                    && rom[base + 0xC0..base + 0xC0 + A_MIX.len()] == A_MIX
+                    && rom[base + 0x1E0..base + 0x1E0 + A_COMB.len()] == A_COMB
+                {
+                    return Some(Self::Sma23Shift8);
+                }
+                if !found_sma4
+                    && tail == B_CONV_TAIL
+                    && base + 0x218 + B_COMB.len() <= rom.len()
+                    && rom[base + 0x120..base + 0x120 + B_MIX.len()] == B_MIX
+                    && rom[base + 0x218..base + 0x218 + B_COMB.len()] == B_COMB
+                {
+                    found_sma4 = true;
+                }
+            }
+            start = base + 1;
         }
-        if find_block(rom, &B_CONV, &B_MIX, 0x120, &B_COMB, 0x218) {
-            return Some(Self::Sma4Mla);
+        if found_sma4 {
+            Some(Self::Sma4Mla)
+        } else {
+            None
         }
-        None
     }
-}
-
-/// Returns `true` when `conv`, `mix` (at `mix_delta`), and `comb` (at
-/// `comb_delta`) signatures all occur at consistent relative offsets.
-fn find_block(rom: &[u8], conv: &[u8; 24], mix: &[u8; 24], mix_delta: usize, comb: &[u8; 24], comb_delta: usize) -> bool {
-    let mut start = 0usize;
-    while let Some(rel) = find_subslice(&rom[start..], conv) {
-        let base = start + rel;
-        if base + comb_delta + comb.len() <= rom.len()
-            && rom[base + mix_delta..base + mix_delta + mix.len()] == mix[..]
-            && rom[base + comb_delta..base + comb_delta + comb.len()] == comb[..]
-        {
-            return true;
-        }
-        start = base + 4;
-    }
-    false
 }
 
 /// Find the first occurrence of `needle` in `haystack`.
@@ -161,5 +167,61 @@ mod tests {
         assert_eq!(EadSmaVersion::Sma4Mla.corpus_rom_count(), 23);
         assert_eq!(EadSmaVersion::detect_from_bytes(&[]), None);
         assert_eq!(EadSmaVersion::detect_from_bytes(&[0u8; 4096]), None);
+    }
+
+    #[test]
+    fn detect_from_bytes_matches_both_revisions_and_priority() {
+        const A_CONV: [u8; 24] = [
+            0x30, 0x00, 0x2D, 0xE9, 0x7F, 0x40, 0xA0, 0xE3, 0xFF, 0x5C, 0xA0, 0xE3, 0x80, 0x50,
+            0x85, 0xE3, 0xF2, 0x30, 0xD0, 0xE0, 0x05, 0xC0, 0x13, 0xE0,
+        ];
+        const A_MIX: [u8; 24] = [
+            0x0D, 0xC0, 0xA0, 0xE1, 0xF0, 0x03, 0x2D, 0xE9, 0xF0, 0x00, 0x9C, 0xE8, 0x01, 0xC0,
+            0x43, 0xE0, 0x07, 0xC0, 0x0C, 0xE2, 0x00, 0x00, 0x5C, 0xE3,
+        ];
+        const A_COMB: [u8; 24] = [
+            0x30, 0x00, 0x2D, 0xE9, 0x01, 0x40, 0xA0, 0xE3, 0x01, 0xC0, 0x43, 0xE2, 0x14, 0x4C,
+            0xA0, 0xE1, 0xF0, 0x50, 0xD0, 0xE1, 0xF0, 0xC0, 0xD1, 0xE1,
+        ];
+        const B_CONV: [u8; 24] = [
+            0x30, 0x00, 0x2D, 0xE9, 0x7F, 0x40, 0xA0, 0xE3, 0xFF, 0x5C, 0xA0, 0xE3, 0x80, 0x50,
+            0x85, 0xE3, 0xF2, 0x30, 0xD0, 0xE0, 0x00, 0x00, 0x53, 0xE3,
+        ];
+        const B_MIX: [u8; 24] = [
+            0x0D, 0xC0, 0xA0, 0xE1, 0xF0, 0x01, 0x2D, 0xE9, 0xF0, 0x00, 0x9C, 0xE8, 0x01, 0xC0,
+            0x43, 0xE0, 0x07, 0xC0, 0x0C, 0xE2, 0x00, 0x00, 0x5C, 0xE3,
+        ];
+        const B_COMB: [u8; 24] = [
+            0x30, 0x00, 0x2D, 0xE9, 0x01, 0x40, 0xA0, 0xE3, 0x14, 0x43, 0xA0, 0xE1, 0x01, 0x40,
+            0x44, 0xE2, 0xF0, 0x50, 0xD0, 0xE1, 0xF0, 0xC0, 0xD1, 0xE1,
+        ];
+
+        let mut rom_a = [0u8; 1024];
+        rom_a[64..88].copy_from_slice(&A_CONV);
+        rom_a[64 + 0xC0..64 + 0xC0 + 24].copy_from_slice(&A_MIX);
+        rom_a[64 + 0x1E0..64 + 0x1E0 + 24].copy_from_slice(&A_COMB);
+        assert_eq!(
+            EadSmaVersion::detect_from_bytes(&rom_a),
+            Some(EadSmaVersion::Sma23Shift8)
+        );
+
+        let mut rom_b = [0u8; 1024];
+        rom_b[32..56].copy_from_slice(&B_CONV);
+        rom_b[32 + 0x120..32 + 0x120 + 24].copy_from_slice(&B_MIX);
+        rom_b[32 + 0x218..32 + 0x218 + 24].copy_from_slice(&B_COMB);
+        assert_eq!(
+            EadSmaVersion::detect_from_bytes(&rom_b),
+            Some(EadSmaVersion::Sma4Mla)
+        );
+
+        // Dual-revision ROM (Sma4Mla appears earlier, Sma23Shift8 later):
+        // Sma23Shift8 must still take priority (SMA3 main game vs classic mode).
+        let mut rom_dual = [0u8; 2048];
+        rom_dual[0..1024].copy_from_slice(&rom_b);
+        rom_dual[1024..2048].copy_from_slice(&rom_a);
+        assert_eq!(
+            EadSmaVersion::detect_from_bytes(&rom_dual),
+            Some(EadSmaVersion::Sma23Shift8)
+        );
     }
 }

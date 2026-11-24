@@ -36,6 +36,9 @@ impl AccuracySynth {
         out_r: &mut [i16],
     ) -> u32 {
         let frames = out_l.len().min(out_r.len());
+        if frames == 0 {
+            return phase_q8;
+        }
         let mut phase = phase_q8;
         let vl = vol_l as i32;
         let vr = vol_r as i32;
@@ -43,26 +46,81 @@ impl AccuracySynth {
         let out_r = &mut out_r[..frames];
 
         // Interior fast path: a 1:1 pitch run wholly inside `pcm` becomes a
-        // contiguous, bounds-check-free sweep that LLVM can auto-vectorize.
-        if step_q8 == crate::freq::Q8_ONE && (phase >> 8) as usize + frames <= pcm.len() {
-            let win = &pcm[(phase >> 8) as usize..(phase >> 8) as usize + frames];
+        // contiguous, bounds-check-free sweep that LLVM auto-vectorizes.
+        let start = (phase >> 8) as usize;
+        if step_q8 == crate::freq::Q8_ONE && start <= pcm.len() && frames <= pcm.len() - start {
+            let win = &pcm[start..start + frames];
             match version {
                 EadSmaVersion::Sma23Shift8 => {
-                    for ((l, r), &b) in out_l.iter_mut().zip(out_r.iter_mut()).zip(win) {
-                        let s = (b as i8) as i32;
-                        *l = (*l as i32).wrapping_add((s.wrapping_mul(vl)) >> 8) as i16;
-                        *r = (*r as i32).wrapping_add((s.wrapping_mul(vr)) >> 8) as i16;
+                    // For |vol| <= 255 (all standard GBA gains), `s * vol` fits
+                    // in `i16` without overflow (`[-32640, 32385]`), unlocking
+                    // 16-bit SIMD (`pmullw` + `psraw` + `paddw`).
+                    if (-255..=255).contains(&vl) && (-255..=255).contains(&vr) {
+                        let vl16 = vl as i16;
+                        let vr16 = vr as i16;
+                        for ((l, r), &b) in out_l.iter_mut().zip(out_r.iter_mut()).zip(win) {
+                            let s = (b as i8) as i16;
+                            *l = l.wrapping_add(s.wrapping_mul(vl16) >> 8);
+                            *r = r.wrapping_add(s.wrapping_mul(vr16) >> 8);
+                        }
+                    } else {
+                        for ((l, r), &b) in out_l.iter_mut().zip(out_r.iter_mut()).zip(win) {
+                            let s = (b as i8) as i32;
+                            *l = (*l as i32).wrapping_add(s.wrapping_mul(vl) >> 8) as i16;
+                            *r = (*r as i32).wrapping_add(s.wrapping_mul(vr) >> 8) as i16;
+                        }
                     }
                 }
                 EadSmaVersion::Sma4Mla => {
+                    let vl16 = vl as i16;
+                    let vr16 = vr as i16;
                     for ((l, r), &b) in out_l.iter_mut().zip(out_r.iter_mut()).zip(win) {
-                        let s = (b as i8) as i32;
-                        *l = (*l as i32).wrapping_add(s.wrapping_mul(vl)) as i16;
-                        *r = (*r as i32).wrapping_add(s.wrapping_mul(vr)) as i16;
+                        let s = (b as i8) as i16;
+                        *l = l.wrapping_add(s.wrapping_mul(vl16));
+                        *r = r.wrapping_add(s.wrapping_mul(vr16));
                     }
                 }
             }
             return phase.wrapping_add(step_q8.wrapping_mul(frames as u32));
+        }
+
+        // Resampled interior fast path: when all sample indices stay in bounds
+        // and `phase` does not wrap `u32`, hoist bounds checks out of the loop.
+        let last_phase_u64 = (phase as u64) + ((frames - 1) as u64).saturating_mul(step_q8 as u64);
+        if last_phase_u64 <= u32::MAX as u64 && ((last_phase_u64 >> 8) as usize) < pcm.len() {
+            let src = &pcm[..=((last_phase_u64 >> 8) as usize)];
+            match version {
+                EadSmaVersion::Sma23Shift8 => {
+                    if (-255..=255).contains(&vl) && (-255..=255).contains(&vr) {
+                        let vl16 = vl as i16;
+                        let vr16 = vr as i16;
+                        for (l, r) in out_l.iter_mut().zip(out_r.iter_mut()) {
+                            let s = (src[(phase >> 8) as usize] as i8) as i16;
+                            *l = l.wrapping_add(s.wrapping_mul(vl16) >> 8);
+                            *r = r.wrapping_add(s.wrapping_mul(vr16) >> 8);
+                            phase = phase.wrapping_add(step_q8);
+                        }
+                    } else {
+                        for (l, r) in out_l.iter_mut().zip(out_r.iter_mut()) {
+                            let s = (src[(phase >> 8) as usize] as i8) as i32;
+                            *l = (*l as i32).wrapping_add(s.wrapping_mul(vl) >> 8) as i16;
+                            *r = (*r as i32).wrapping_add(s.wrapping_mul(vr) >> 8) as i16;
+                            phase = phase.wrapping_add(step_q8);
+                        }
+                    }
+                }
+                EadSmaVersion::Sma4Mla => {
+                    let vl16 = vl as i16;
+                    let vr16 = vr as i16;
+                    for (l, r) in out_l.iter_mut().zip(out_r.iter_mut()) {
+                        let s = (src[(phase >> 8) as usize] as i8) as i16;
+                        *l = l.wrapping_add(s.wrapping_mul(vl16));
+                        *r = r.wrapping_add(s.wrapping_mul(vr16));
+                        phase = phase.wrapping_add(step_q8);
+                    }
+                }
+            }
+            return phase;
         }
 
         match version {
@@ -77,12 +135,14 @@ impl AccuracySynth {
                 }
             }
             EadSmaVersion::Sma4Mla => {
+                let vl16 = vl as i16;
+                let vr16 = vr as i16;
                 for (l, r) in out_l.iter_mut().zip(out_r.iter_mut()) {
                     let s = pcm
                         .get((phase >> 8) as usize)
-                        .map_or(0, |&b| b as i8) as i32;
-                    *l = (*l as i32).wrapping_add(s.wrapping_mul(vl)) as i16;
-                    *r = (*r as i32).wrapping_add(s.wrapping_mul(vr)) as i16;
+                        .map_or(0, |&b| b as i8) as i16;
+                    *l = l.wrapping_add(s.wrapping_mul(vl16));
+                    *r = r.wrapping_add(s.wrapping_mul(vr16));
                     phase = phase.wrapping_add(step_q8);
                 }
             }
@@ -114,15 +174,36 @@ impl AccuracySynth {
         let (vol_l, vol_r) = pan_gains(voice.volume, voice.pan);
         let desc = sample.desc;
         let end = desc.end_index();
+        if end == 0 {
+            if !desc.is_looped() {
+                voice.active = false;
+            }
+            return;
+        }
         let looped = desc.is_looped() && desc.loop_len() > 0;
+        let end_q8_u64 = (end as u64) << 8;
         let mut phase = voice.phase_q8;
         let mut done = 0usize;
 
         while done < frames {
+            if (phase as u64) >= end_q8_u64 {
+                if looped {
+                    let loop_q8 = desc.loop_len().wrapping_shl(8);
+                    if loop_q8 == 0 {
+                        break;
+                    }
+                    phase = phase.wrapping_sub(loop_q8);
+                    if (phase as u64) >= end_q8_u64 {
+                        break;
+                    }
+                } else {
+                    voice.active = false;
+                    break;
+                }
+            }
             let remaining = frames - done;
-            let projected =
-                phase.wrapping_add(voice.step_q8.wrapping_mul(remaining as u32)) >> 8;
-            if projected < end {
+            let projected_q8 = (phase as u64) + (voice.step_q8 as u64) * (remaining as u64);
+            if projected_q8 < end_q8_u64 {
                 phase = Self::mix_kernel(
                     version,
                     sample.pcm_bytes,
@@ -180,16 +261,22 @@ impl AccuracySynth {
     ///   test to the shifted value.
     pub fn convert_to_dma8(version: EadSmaVersion, src: &[i16], dst: &mut [i8]) {
         let n = src.len().min(dst.len());
+        let src = &src[..n];
+        let dst = &mut dst[..n];
         match version {
             EadSmaVersion::Sma23Shift8 => {
-                for (d, &v) in dst[..n].iter_mut().zip(&src[..n]) {
-                    *d = saturate_low_byte(v as i32);
+                // Mathematically identical to the ARM `(v & 0xFF80)` saturation
+                // check for all 65,536 `i16` inputs, and auto-vectorizes to
+                // `pminsw`/`pmaxsw`/`packsswb`.
+                for (d, &v) in dst.iter_mut().zip(src) {
+                    *d = v.clamp(-128, 127) as i8;
                 }
             }
             EadSmaVersion::Sma4Mla => {
-                for (d, &v) in dst[..n].iter_mut().zip(&src[..n]) {
-                    let t = (v as i32).wrapping_add(if v < 0 { 127 } else { 0 }) >> 7;
-                    *d = saturate_low_byte(t);
+                // `(v + (v < 0 ? 127 : 0)) >> 7` equals `v / 128` (truncating
+                // toward zero) for every `i16`, staying in 16-bit SIMD lanes.
+                for (d, &v) in dst.iter_mut().zip(src) {
+                    *d = (v / 128).clamp(-128, 127) as i8;
                 }
             }
         }
@@ -206,54 +293,64 @@ impl AccuracySynth {
     /// value becomes the sign extension `0`/`-1`).
     pub fn combine(version: EadSmaVersion, main: &mut [i16], aux: &mut [i16], shift: u32) {
         let n = main.len().min(aux.len());
+        let main = &mut main[..n];
+        let aux = &mut aux[..n];
+        if shift >= 32 {
+            for (m, a) in main.iter_mut().zip(aux.iter_mut()) {
+                let av = *a;
+                *m = m.wrapping_add(av);
+                *a = av >> 15;
+            }
+            return;
+        }
+        if shift == 0 {
+            for (m, &a) in main.iter_mut().zip(aux.iter()) {
+                *m = m.wrapping_add(a);
+            }
+            return;
+        }
         match version {
             EadSmaVersion::Sma23Shift8 => {
-                let bias: i32 = if shift == 0 || shift >= 32 {
-                    0
+                if shift < 16 {
+                    // For shift in 1..=15, `(v + (1 << (shift - 1))) >> shift` equals
+                    // `(v >> shift) + ((v >> (shift - 1)) & 1)` for all 65,536 `i16`s,
+                    // staying entirely in 16-bit SIMD lanes without widen/narrow.
+                    let s1 = shift - 1;
+                    for (m, a) in main.iter_mut().zip(aux.iter_mut()) {
+                        let av = *a;
+                        *m = m.wrapping_add(av);
+                        *a = (av >> shift).wrapping_add((av >> s1) & 1);
+                    }
                 } else {
-                    1i32 << (shift - 1)
-                };
-                for (m, a) in main[..n].iter_mut().zip(&mut aux[..n]) {
-                    *m = m.wrapping_add(*a);
-                    let v = *a as i32;
-                    *a = (if shift >= 32 {
-                        i32::from(v < 0).wrapping_neg()
-                    } else {
-                        v.wrapping_add(bias) >> shift
-                    }) as i16;
+                    let bias: i32 = 1i32 << (shift - 1);
+                    for (m, a) in main.iter_mut().zip(aux.iter_mut()) {
+                        let av = *a;
+                        *m = m.wrapping_add(av);
+                        *a = ((av as i32).wrapping_add(bias) >> shift) as i16;
+                    }
                 }
             }
             EadSmaVersion::Sma4Mla => {
-                let mask: i32 = if shift >= 32 {
-                    -1
+                if shift < 16 {
+                    // For shift in 1..=15 and `av < 0`, `av + ((1 << shift) - 1)` is
+                    // in `[-32767, 32766]`, never overflowing `i16`.
+                    let mask16 = ((1u16 << shift) - 1) as i16;
+                    for (m, a) in main.iter_mut().zip(aux.iter_mut()) {
+                        let av = *a;
+                        *m = m.wrapping_add(av);
+                        *a = av.wrapping_add((av >> 15) & mask16) >> shift;
+                    }
                 } else {
-                    ((1u32 << shift) - 1) as i32
-                };
-                for (m, a) in main[..n].iter_mut().zip(&mut aux[..n]) {
-                    *m = m.wrapping_add(*a);
-                    let v = *a as i32;
-                    *a = (if shift >= 32 {
-                        i32::from(v < 0).wrapping_neg()
-                    } else {
-                        v.wrapping_add(if v < 0 { mask } else { 0 }) >> shift
-                    }) as i16;
+                    let mask: i32 = ((1u32 << shift) - 1) as i32;
+                    for (m, a) in main.iter_mut().zip(aux.iter_mut()) {
+                        let av = *a;
+                        *m = m.wrapping_add(av);
+                        let v = av as i32;
+                        *a = (v.wrapping_add((v >> 31) & mask) >> shift) as i16;
+                    }
                 }
             }
         }
-    }
-}
-
-/// The ARM converter's shared saturation test on a 32-bit value `t`:
-/// when `(t & 0xFF80)` is neither `0` nor `0xFF80`, the output byte is
-/// `127` for positive values or `-128` for negative ones; otherwise the
-/// low byte of `t` passes through unchanged.
-#[inline]
-fn saturate_low_byte(t: i32) -> i8 {
-    let masked = t & 0xFF80;
-    if masked != 0 && masked != 0xFF80 {
-        (127u32.wrapping_add((t as u32) >> 31) & 0xFF) as u8 as i8
-    } else {
-        t as i8
     }
 }
 
@@ -390,7 +487,14 @@ impl StudioSynth {
         out_r: &mut [f32],
     ) -> bool {
         let frames = out_l.len().min(out_r.len());
-        if frames == 0 || sample.is_empty() || self.output_rate_hz <= 0.0 || playback_rate_hz <= 0.0
+        let mut p = *pos;
+        if frames == 0
+            || sample.is_empty()
+            || !p.is_finite()
+            || !self.output_rate_hz.is_finite()
+            || !playback_rate_hz.is_finite()
+            || self.output_rate_hz <= 0.0
+            || playback_rate_hz <= 0.0
         {
             return false;
         }
@@ -408,15 +512,23 @@ impl StudioSynth {
         {
             (Some(desc.loop_start as usize), desc.loop_end as usize)
         } else {
-            (None, pcm_len)
+            let end = if desc.total_len > 0 {
+                (desc.total_len as usize).min(pcm_len)
+            } else {
+                pcm_len
+            };
+            (None, end)
         };
         let loop_end_f = loop_end as f64;
         let loop_len_f = loop_start.map(|ls| (loop_end - ls) as f64);
 
-        let mut p = *pos;
-
         if self.lanczos_a == 3 {
             const Q32_SCALE: f64 = 4_294_967_296.0;
+            // Stack-allocated L1-hot f32 block buffer (512 + 8 guard padding so
+            // `b & 511` + 5 is statically < 520 with zero bounds checks).
+            const FBUF_MASK: usize = 511;
+            const FBUF_CAP: usize = FBUF_MASK + 1;
+            let mut fbuf = [0.0f32; FBUF_CAP + 8];
             let safe_end_f = loop_end.saturating_sub(3) as f64;
             let step_fp = (step * Q32_SCALE) as u64;
             let mut i = 0usize;
@@ -424,8 +536,10 @@ impl StudioSynth {
             while i < frames {
                 if p >= loop_end_f {
                     if let Some(ll) = loop_len_f {
-                        while p >= loop_end_f {
-                            p -= ll;
+                        p -= ll;
+                        if p >= loop_end_f {
+                            let ls = loop_start.unwrap_or(0) as f64;
+                            p = ls + ((p - ls) % ll);
                         }
                     } else {
                         *pos = p;
@@ -433,7 +547,8 @@ impl StudioSynth {
                     }
                 }
 
-                // Interior fast path: 32.32 fixed-point phase + zero boundary/wrap checks.
+                // Interior fast path: 32.32 fixed-point phase + block PCM->f32
+                // pre-conversion + 4-way unrolled bounds-check-free Lanczos-3.
                 if loop_end >= 6 && p >= 2.0 && p < safe_end_f && step_fp > 0 {
                     let rem = frames - i;
                     let max_n = ((safe_end_f - p) / step) as usize;
@@ -447,27 +562,121 @@ impl StudioSynth {
                         n -= 1;
                     }
                     if n > 0 && (fp >> 32) >= 2 {
-                        let last_idx =
-                            ((fp.wrapping_add(((n - 1) as u64).wrapping_mul(step_fp))) >> 32)
-                                as usize;
-                        let src = &pcm[..last_idx + 4];
                         let mut ph_shifted = fp - (2u64 << 32);
-                        for (ol, or) in out_l[i..i + n].iter_mut().zip(&mut out_r[i..i + n]) {
-                            let b0 = (ph_shifted >> 32) as usize;
-                            let phase = ((ph_shifted >> 22) as usize) & (LANCZOS_PHASES - 1);
-                            let w = &LANCZOS3_LUT[phase];
-                            let s5 = (src[b0 + 5] as i8) as f32;
-                            let s0 = (src[b0] as i8) as f32;
-                            let s1 = (src[b0 + 1] as i8) as f32;
-                            let s2 = (src[b0 + 2] as i8) as f32;
-                            let s3 = (src[b0 + 3] as i8) as f32;
-                            let s4 = (src[b0 + 4] as i8) as f32;
-                            let val = (s0 * w[0] + s1 * w[1])
-                                + (s2 * w[2] + s3 * w[3])
-                                + (s4 * w[4] + s5 * w[5]);
-                            *ol += val * scale_l;
-                            *or += val * scale_r;
-                            ph_shifted = ph_shifted.wrapping_add(step_fp);
+                        let mut done_in = 0usize;
+                        while done_in < n {
+                            let rem_in = n - done_in;
+                            let first_b0 = (ph_shifted >> 32) as usize;
+                            // Choose a chunk whose PCM span fits inside `FBUF_CAP`.
+                            let mut chunk_n = rem_in;
+                            let last_b0 = ((ph_shifted
+                                .wrapping_add(((chunk_n - 1) as u64).wrapping_mul(step_fp)))
+                                >> 32) as usize;
+                            if last_b0 - first_b0 + 6 > FBUF_CAP {
+                                let max_advance = (FBUF_CAP - 6) as u64;
+                                chunk_n = (((max_advance << 32) / step_fp) as usize)
+                                    .max(1)
+                                    .min(rem_in);
+                                while chunk_n > 1 {
+                                    let lb = ((ph_shifted
+                                        .wrapping_add(((chunk_n - 1) as u64).wrapping_mul(step_fp)))
+                                        >> 32) as usize;
+                                    if lb - first_b0 + 6 <= FBUF_CAP {
+                                        break;
+                                    }
+                                    chunk_n -= 1;
+                                }
+                            }
+                            let chunk_last_b0 = ((ph_shifted
+                                .wrapping_add(((chunk_n - 1) as u64).wrapping_mul(step_fp)))
+                                >> 32) as usize;
+                            let span = (chunk_last_b0 - first_b0) + 6;
+                            if span <= FBUF_CAP {
+                                let src = &pcm[first_b0..first_b0 + span];
+                                for (dst_f, &b) in fbuf[..span].iter_mut().zip(src) {
+                                    *dst_f = (b as i8) as f32;
+                                }
+                                let mut ph_local = ph_shifted - ((first_b0 as u64) << 32);
+                                let ol_slice = &mut out_l[i + done_in..i + done_in + chunk_n];
+                                let or_slice = &mut out_r[i + done_in..i + done_in + chunk_n];
+                                let (l_chunks, l_rem) = ol_slice.as_chunks_mut::<4>();
+                                let (r_chunks, r_rem) = or_slice.as_chunks_mut::<4>();
+                                for (lc, rc) in l_chunks.iter_mut().zip(r_chunks.iter_mut()) {
+                                    let ph0 = ph_local;
+                                    let ph1 = ph0.wrapping_add(step_fp);
+                                    let ph2 = ph1.wrapping_add(step_fp);
+                                    let ph3 = ph2.wrapping_add(step_fp);
+                                    ph_local = ph3.wrapping_add(step_fp);
+
+                                    let b0 = ((ph0 >> 32) as usize) & FBUF_MASK;
+                                    let w0 = &LANCZOS3_LUT
+                                        [((ph0 >> 22) as usize) & (LANCZOS_PHASES - 1)];
+                                    let v0 = ((fbuf[b0] * w0[0] + fbuf[b0 + 1] * w0[1])
+                                        + (fbuf[b0 + 2] * w0[2] + fbuf[b0 + 3] * w0[3]))
+                                        + (fbuf[b0 + 4] * w0[4] + fbuf[b0 + 5] * w0[5]);
+
+                                    let b1 = ((ph1 >> 32) as usize) & FBUF_MASK;
+                                    let w1 = &LANCZOS3_LUT
+                                        [((ph1 >> 22) as usize) & (LANCZOS_PHASES - 1)];
+                                    let v1 = ((fbuf[b1] * w1[0] + fbuf[b1 + 1] * w1[1])
+                                        + (fbuf[b1 + 2] * w1[2] + fbuf[b1 + 3] * w1[3]))
+                                        + (fbuf[b1 + 4] * w1[4] + fbuf[b1 + 5] * w1[5]);
+
+                                    let b2 = ((ph2 >> 32) as usize) & FBUF_MASK;
+                                    let w2 = &LANCZOS3_LUT
+                                        [((ph2 >> 22) as usize) & (LANCZOS_PHASES - 1)];
+                                    let v2 = ((fbuf[b2] * w2[0] + fbuf[b2 + 1] * w2[1])
+                                        + (fbuf[b2 + 2] * w2[2] + fbuf[b2 + 3] * w2[3]))
+                                        + (fbuf[b2 + 4] * w2[4] + fbuf[b2 + 5] * w2[5]);
+
+                                    let b3 = ((ph3 >> 32) as usize) & FBUF_MASK;
+                                    let w3 = &LANCZOS3_LUT
+                                        [((ph3 >> 22) as usize) & (LANCZOS_PHASES - 1)];
+                                    let v3 = ((fbuf[b3] * w3[0] + fbuf[b3 + 1] * w3[1])
+                                        + (fbuf[b3 + 2] * w3[2] + fbuf[b3 + 3] * w3[3]))
+                                        + (fbuf[b3 + 4] * w3[4] + fbuf[b3 + 5] * w3[5]);
+
+                                    lc[0] += v0 * scale_l;
+                                    lc[1] += v1 * scale_l;
+                                    lc[2] += v2 * scale_l;
+                                    lc[3] += v3 * scale_l;
+                                    rc[0] += v0 * scale_r;
+                                    rc[1] += v1 * scale_r;
+                                    rc[2] += v2 * scale_r;
+                                    rc[3] += v3 * scale_r;
+                                }
+                                for (ol, or) in l_rem.iter_mut().zip(r_rem.iter_mut()) {
+                                    let b0 = ((ph_local >> 32) as usize) & FBUF_MASK;
+                                    let w = &LANCZOS3_LUT
+                                        [((ph_local >> 22) as usize) & (LANCZOS_PHASES - 1)];
+                                    let val = ((fbuf[b0] * w[0] + fbuf[b0 + 1] * w[1])
+                                        + (fbuf[b0 + 2] * w[2] + fbuf[b0 + 3] * w[3]))
+                                        + (fbuf[b0 + 4] * w[4] + fbuf[b0 + 5] * w[5]);
+                                    *ol += val * scale_l;
+                                    *or += val * scale_r;
+                                    ph_local = ph_local.wrapping_add(step_fp);
+                                }
+                                ph_shifted =
+                                    ph_shifted.wrapping_add((chunk_n as u64).wrapping_mul(step_fp));
+                            } else {
+                                // Extreme step (> ~500 samples/frame): single-frame direct read.
+                                let b0 = first_b0;
+                                let w = &LANCZOS3_LUT
+                                    [((ph_shifted >> 22) as usize) & (LANCZOS_PHASES - 1)];
+                                let s0 = (pcm[b0] as i8) as f32;
+                                let s1 = (pcm[b0 + 1] as i8) as f32;
+                                let s2 = (pcm[b0 + 2] as i8) as f32;
+                                let s3 = (pcm[b0 + 3] as i8) as f32;
+                                let s4 = (pcm[b0 + 4] as i8) as f32;
+                                let s5 = (pcm[b0 + 5] as i8) as f32;
+                                let val = (s0 * w[0] + s1 * w[1])
+                                    + (s2 * w[2] + s3 * w[3])
+                                    + (s4 * w[4] + s5 * w[5]);
+                                out_l[i + done_in] += val * scale_l;
+                                out_r[i + done_in] += val * scale_r;
+                                ph_shifted = ph_shifted.wrapping_add(step_fp);
+                            }
+                            done_in += chunk_n;
                         }
                         p += (n as f64) * step;
                         i += n;
@@ -497,8 +706,10 @@ impl StudioSynth {
             for (ol, or) in out_l[..frames].iter_mut().zip(&mut out_r[..frames]) {
                 if p >= loop_end_f {
                     if let Some(ll) = loop_len_f {
-                        while p >= loop_end_f {
-                            p -= ll;
+                        p -= ll;
+                        if p >= loop_end_f {
+                            let ls = loop_start.unwrap_or(0) as f64;
+                            p = ls + ((p - ls) % ll);
                         }
                     } else {
                         *pos = p;
@@ -571,6 +782,129 @@ mod tests {
     }
 
     #[test]
+    fn converter_and_combine_match_arm_reference_for_all_i16() {
+        fn ref_saturate_low_byte(t: i32) -> i8 {
+            let masked = t & 0xFF80;
+            if masked != 0 && masked != 0xFF80 {
+                (127u32.wrapping_add((t as u32) >> 31) & 0xFF) as u8 as i8
+            } else {
+                t as i8
+            }
+        }
+
+        let mut chunk_src = [0i16; 256];
+        let mut chunk_dst = [0i8; 256];
+        let mut main_buf = [0i16; 256];
+        let mut aux_buf = [0i16; 256];
+
+        for block in 0..256i32 {
+            for (i, slot) in chunk_src.iter_mut().enumerate() {
+                *slot = (block * 256 + i as i32 - 32768) as i16;
+            }
+            // Exhaustive convert_to_dma8 equivalence for both revisions
+            AccuracySynth::convert_to_dma8(EadSmaVersion::Sma23Shift8, &chunk_src, &mut chunk_dst);
+            for (i, &v) in chunk_src.iter().enumerate() {
+                assert_eq!(chunk_dst[i], ref_saturate_low_byte(v as i32));
+            }
+            AccuracySynth::convert_to_dma8(EadSmaVersion::Sma4Mla, &chunk_src, &mut chunk_dst);
+            for (i, &v) in chunk_src.iter().enumerate() {
+                let t = (v as i32).wrapping_add(if v < 0 { 127 } else { 0 }) >> 7;
+                assert_eq!(chunk_dst[i], ref_saturate_low_byte(t));
+            }
+
+            // Exhaustive combine equivalence across key shift values
+            for &shift in &[0u32, 1, 2, 4, 7, 15, 16, 31, 32, 40] {
+                main_buf.fill(100);
+                aux_buf.copy_from_slice(&chunk_src);
+                AccuracySynth::combine(
+                    EadSmaVersion::Sma23Shift8,
+                    &mut main_buf,
+                    &mut aux_buf,
+                    shift,
+                );
+                let bias: i32 = if shift == 0 || shift >= 32 {
+                    0
+                } else {
+                    1i32 << (shift - 1)
+                };
+                for (i, &v) in chunk_src.iter().enumerate() {
+                    let expected_aux = (if shift >= 32 {
+                        i32::from(v < 0).wrapping_neg()
+                    } else {
+                        (v as i32).wrapping_add(bias) >> shift
+                    }) as i16;
+                    assert_eq!(main_buf[i], 100i16.wrapping_add(v));
+                    assert_eq!(aux_buf[i], expected_aux);
+                }
+
+                main_buf.fill(-100);
+                aux_buf.copy_from_slice(&chunk_src);
+                AccuracySynth::combine(
+                    EadSmaVersion::Sma4Mla,
+                    &mut main_buf,
+                    &mut aux_buf,
+                    shift,
+                );
+                let mask: i32 = if shift >= 32 {
+                    -1
+                } else {
+                    ((1u32 << shift) - 1) as i32
+                };
+                for (i, &v) in chunk_src.iter().enumerate() {
+                    let expected_aux = (if shift >= 32 {
+                        i32::from(v < 0).wrapping_neg()
+                    } else {
+                        (v as i32).wrapping_add(if v < 0 { mask } else { 0 }) >> shift
+                    }) as i16;
+                    assert_eq!(main_buf[i], (-100i16).wrapping_add(v));
+                    assert_eq!(aux_buf[i], expected_aux);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mix_voice_edge_cases_do_not_panic_or_loop() {
+        let pcm = [10u8, 20, 30, 40];
+        let zero_desc = EadSampleDesc {
+            total_len: 0,
+            rate_word: 0,
+            loop_start: 0,
+            loop_end: 0,
+        };
+        let view_zero = EadSampleView::from_parts(zero_desc, &pcm);
+        let mut voice = EadVoice::new(256, 128, 64);
+        let mut out_l = [0i16; 16];
+        let mut out_r = [0i16; 16];
+        AccuracySynth::mix_voice(
+            EadSmaVersion::Sma23Shift8,
+            &view_zero,
+            &mut voice,
+            &mut out_l,
+            &mut out_r,
+        );
+        assert!(!voice.active);
+
+        // One-shot voice starting past end terminates cleanly without underflow
+        let oneshot_desc = EadSampleDesc {
+            total_len: 4,
+            rate_word: 0,
+            loop_start: 0,
+            loop_end: 0,
+        };
+        let view_os = EadSampleView::from_parts(oneshot_desc, &pcm);
+        let mut voice_past = EadVoice::with_phase(10 << 8, 256, 128, 64);
+        AccuracySynth::mix_voice(
+            EadSmaVersion::Sma4Mla,
+            &view_os,
+            &mut voice_past,
+            &mut out_l,
+            &mut out_r,
+        );
+        assert!(!voice_past.active);
+    }
+
+    #[test]
     fn studio_synth_renders_finite_stereo_audio() {
         let pcm: [u8; 64] = core::array::from_fn(|i| (((i * 19) % 256) as i32 - 128) as i8 as u8);
         let desc = EadSampleDesc {
@@ -588,6 +922,12 @@ mod tests {
         assert!(l.iter().all(|v| v.is_finite()));
         assert!(r.iter().all(|v| v.is_finite()));
         assert!(l.iter().any(|&v| v.abs() > 1e-4));
+
+        // Non-finite position returns false cleanly
+        let mut bad_pos = f64::NAN;
+        assert!(!studio.render_voice_f32(&view, &mut bad_pos, 10_512.0, 0.9, 0.0, &mut l, &mut r));
+        let mut inf_pos = f64::INFINITY;
+        assert!(!studio.render_voice_f32(&view, &mut inf_pos, 10_512.0, 0.9, 0.0, &mut l, &mut r));
 
         let studio_a2 = StudioSynth {
             output_rate_hz: 48_000.0,

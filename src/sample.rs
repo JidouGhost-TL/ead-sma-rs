@@ -84,7 +84,7 @@ impl EadSampleDesc {
 
 /// Zero-allocation view over an EAD/SRD sample: a parsed descriptor plus the
 /// signed 8-bit PCM payload that follows it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EadSampleView<'a> {
     /// Parsed 16-byte descriptor header.
     pub desc: EadSampleDesc,
@@ -116,17 +116,24 @@ impl<'a> EadSampleView<'a> {
         self.pcm_bytes.get(index).map_or(0, |&b| b as i8)
     }
 
+    /// Number of bytes (samples) in the PCM payload.
+    #[inline]
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.pcm_bytes.len()
+    }
+
     /// Returns `true` when the PCM payload is empty.
     #[inline]
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.pcm_bytes.is_empty()
     }
 }
 
 /// Owned EAD/SRD sample (requires the `alloc` feature).
 #[cfg(feature = "alloc")]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EadSample {
     /// Parsed 16-byte descriptor header.
     pub desc: EadSampleDesc,
