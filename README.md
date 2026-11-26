@@ -101,6 +101,10 @@ cargo bench --bench bench_audio
 | `AccuracySynth::convert + combine` (176f) | ~7.10 GSamples/s |
 | `StudioSynth::render_voice_f32` (48 kHz Lanczos-3, 1,024f) | ~904 MSamples/s |
 
+## Community & Support
+
+Come discuss the wonders of GBA RE, modding, etc. — also the best way to report issues or bugs, or ask for help on your own project: https://discord.gg/khwxFSVNrS
+
 ## License
 
 Licensed under either of:
